@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Streaming time</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>Streaming time</h1>
+    <span id="pill" class="pill">&hellip;</span>
+  </header>
+
+  <p id="msg" class="msg"></p>
+  <section id="limits"></section>
+  <p id="info" class="info"></p>
+
+  <button id="toggleTimer" class="btn" type="button">Hide on-page timer</button>
+
+  <section id="debug" class="debug" hidden>
+    <h2>Test controls <small>debug build</small></h2>
+
+    <label>Simulated date &amp; time
+      <input type="datetime-local" id="dbgTime">
+    </label>
+    <div class="row">
+      <button id="dbgSetTime" type="button">Set time</button>
+      <button id="dbgResetTime" type="button">Use real time</button>
+    </div>
+
+    <label>Counting speed (&times;)
+      <span class="row"><input type="number" id="dbgSpeed" min="1" max="3600" value="1"><button id="dbgSetSpeed" type="button">Set</button></span>
+    </label>
+
+    <label class="chk"><input type="checkbox" id="dbgIgnore"> Ignore school hours</label>
+
+    <label>Add usage (minutes, can be negative)
+      <span class="row"><input type="number" id="dbgMin" value="30"><input type="date" id="dbgDate"><button id="dbgAdd" type="button">Add</button></span>
+    </label>
+
+    <button id="dbgClear" type="button" class="danger">Clear all usage</button>
+
+    <div class="row"><button id="dbgSync" type="button">Upload to sync now</button></div>
+    <p id="dbgDevices" class="info"></p>
+
+    <details><summary>Stored usage (all devices)</summary><pre id="dbgRaw"></pre></details>
+  </section>
+
+  <script src="config.js"></script>
+  <script src="core.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

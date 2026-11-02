@@ -1,0 +1,38 @@
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { width: 340px; min-height: 220px; margin: 0; padding: 16px; background: #14161a; color: #f2f2f2;
+  font: 13.5px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+.pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: #2a2e35; color: #c3c8d1; white-space: nowrap; }
+.pill.on { background: #123d27; color: #6ff0a8; }
+.pill.warn { background: #4a3608; color: #f5c862; }
+.pill.lock { background: #4a1a16; color: #ff9a8f; }
+.msg { margin: 0 0 14px; color: #c3c8d1; }
+.lim { margin-bottom: 14px; }
+.lim .top { display: flex; justify-content: space-between; margin-bottom: 5px; }
+.lim .top b { font-weight: 600; }
+.lim .top span { font-variant-numeric: tabular-nums; }
+.bar { height: 7px; border-radius: 4px; background: #2a2e35; overflow: hidden; }
+.fill { height: 100%; background: #3ddc84; transition: width .4s; }
+.fill.warn { background: #f5b942; }
+.fill.full { background: #ff6b5e; }
+.lim .sub { margin-top: 4px; font-size: 12px; color: #8b919c; font-variant-numeric: tabular-nums; }
+.info { font-size: 12px; color: #8b919c; margin: 4px 0 14px; }
+button { font: inherit; cursor: pointer; color: #f2f2f2; background: #2a2e35; border: 1px solid #3a3f48;
+  border-radius: 8px; padding: 6px 12px; }
+button:hover { background: #343942; }
+button:focus-visible, input:focus-visible { outline: 2px solid #3ddc84; outline-offset: 1px; }
+.btn { width: 100%; }
+.debug { margin-top: 18px; padding-top: 14px; border-top: 1px dashed #3a3f48; display: grid; gap: 10px; }
+.debug h2 { margin: 0; font-size: 13px; }
+.debug h2 small { color: #f5b942; font-weight: 400; margin-left: 6px; }
+.debug label { display: grid; gap: 4px; font-size: 12px; color: #aeb4bf; }
+.debug .chk { display: flex; align-items: center; gap: 6px; }
+.row { display: flex; gap: 6px; }
+.row > * { flex: 1; min-width: 0; }
+input[type=number], input[type=date], input[type=datetime-local] { font: inherit; color: #f2f2f2; background: #1d2026;
+  border: 1px solid #3a3f48; border-radius: 6px; padding: 5px 6px; color-scheme: dark; }
+.danger { border-color: #7a2f29; color: #ff9a8f; }
+pre { max-height: 140px; overflow: auto; font-size: 11px; background: #1d2026; padding: 8px; border-radius: 6px; }
+details summary { cursor: pointer; font-size: 12px; color: #aeb4bf; }
