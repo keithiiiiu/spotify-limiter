@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='UTF-8'?> 
 <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'> 
   <app appid='kmdejapohieelfpbnpgdianocpmdfnkm'> 
-  <updatecheck codebase='https://github.com/keithiiiiu/xxxxxxxxxxxxx' version='1.2.8' /> 
+  <updatecheck codebase='https://github.com/keithiiiiu/spotify-limiter/raw/refs/heads/main/extension/edge.crx' version='1.2.8' /> 
   </app> 
 </gupdate>
