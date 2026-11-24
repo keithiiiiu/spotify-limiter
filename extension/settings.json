@@ -47,7 +47,7 @@
   ],
 
   "notices": {
-    "newInstall": { "message": "" },
-    "update":     { "id": "", "message": "" }
+    "newInstall": { "message": "New Install" },
+    "update":     { "id": "1", "message": "extension updated" }
   }
 }
