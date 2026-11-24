@@ -17,7 +17,7 @@
   "limits": {
     "daily":   { "enabled": true,  "hours": 1,  "days": 1  },
     "weekly":  { "enabled": true,  "hours": 3,  "days": 7  },
-    "monthly": { "enabled": false, "hours": 15, "days": 30 }
+    "monthly": { "enabled": true, "hours": 10, "days": 30 }
   },
 
   "warning": { "enabled": true, "thresholds": [75, 90, 95] },
