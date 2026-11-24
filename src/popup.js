@@ -18,6 +18,19 @@
     return e;
   }
 
+  function ago(ms) {
+    const m = Math.round((Date.now() - ms) / 60000);
+    return m < 1 ? 'just now' : m < 90 ? m + ' min ago' : Math.round(m / 60) + ' h ago';
+  }
+  function settingsText(s) {
+    if (!s || !s.enabled) return 'Settings: built-in.';
+    if (s.source === 'central') {
+      return 'Settings: central' + (s.version ? ' v' + s.version : '') + ', checked ' + (s.checkedAt ? ago(s.checkedAt) : 'never') +
+        (s.error ? ' (last check failed - using saved copy)' : '') + '.';
+    }
+    return 'Settings: built-in defaults' + (s.error ? ' (central file unavailable)' : ' (not downloaded yet)') + '.';
+  }
+
   function statusLine(st) {
     if (st.locked) {
       return { pill: 'Locked', cls: 'lock',
@@ -66,8 +79,8 @@
       box.appendChild(wrap);
     });
 
-    const days = self.SL_CONFIG.schoolHours.days.map((d) => DAYS[d]).join(', ');
-    $('info').textContent = 'Counted ' + days + ' ' + st.periodsText + ', excluding holidays.';
+    $('info').textContent = 'Counted ' + st.daysText + ' ' + st.periodsText + ', excluding holidays.';
+    $('settingsInfo').textContent = settingsText(st.settings);
     $('toggleTimer').textContent = st.timerHidden ? 'Show on-page timer' : 'Hide on-page timer';
 
     if (st.debugEnabled && self.SL_CONFIG.debug.enabled) renderDebug(st);
@@ -127,6 +140,10 @@
     $('dbgIgnore').addEventListener('change', (e) => dbg({ op: 'ignoreHours', value: e.target.checked }));
     $('dbgAdd').addEventListener('click', () => dbg({ op: 'addUsage', date: $('dbgDate').value, minutes: $('dbgMin').value }));
     $('dbgSync').addEventListener('click', () => dbg({ op: 'syncNow' }));
+    $('dbgFetch').addEventListener('click', () => dbg({ op: 'fetchSettings' }));
+    $('dbgSimInstall').addEventListener('click', () => dbg({ op: 'simNotice', kind: 'newInstall' }));
+    $('dbgSimUpdate').addEventListener('click', () => dbg({ op: 'simNotice', kind: 'update' }));
+    $('dbgResetNotices').addEventListener('click', () => dbg({ op: 'resetNotices' }));
     $('dbgClear').addEventListener('click', () => {
       if (confirm('Delete ALL recorded Spotify usage?')) dbg({ op: 'clearUsage' });
     });

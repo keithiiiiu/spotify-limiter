@@ -1,8 +1,8 @@
 /* Service worker. The ONLY place usage is written. */
 importScripts('config.js', 'core.js');
 
-const C = self.SL_CONFIG;
-const SL = self.SL;
+const C = self.SL_CONFIG; // built-in defaults (debug / sync / remote url live only here)
+const SL = self.SL;       // SL.getConfig() = EFFECTIVE settings (defaults + central JSON)
 const KEY = 'sl_state';
 const KEEP_DAYS = 400;          // local history kept (tiny)
 const SYNC_DAYS = 40;           // days uploaded to browser sync (windows are max 30)
@@ -17,17 +17,6 @@ const ICONS = {
 function siteUrlPatterns() {
   return SL.enabledHosts().map((h) => 'https://*.' + h + '/*');
 }
-
-// Warn (console only) if config enables a host the manifest doesn't cover.
-(function checkManifest() {
-  const bases = (chrome.runtime.getManifest().host_permissions || [])
-    .map((p) => p.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^\*\./, ''));
-  SL.enabledHosts().forEach((h) => {
-    if (!bases.some((b) => h === b || h.endsWith('.' + b))) {
-      console.warn('[limiter] "' + h + '" is enabled in config.js but missing from manifest.json');
-    }
-  });
-})();
 
 /* ---------- helpers ---------- */
 const SYNC_TIMEOUT_MS = 3000;
@@ -233,6 +222,7 @@ async function enforceTab(tabId, locked) {
 function publicStatus(s, extra) {
   const st = SL.computeStatus(s, nowOf(s), Date.now());
   st.lastError = lastError;
+  st.settings = settingsInfo();
   return extra ? Object.assign(st, extra) : st;
 }
 
@@ -243,8 +233,17 @@ function handleTick(kind, sender) {
   });
 }
 
+function siteOf(sender) {
+  try {
+    return SL.siteForHost(new URL(sender.url || (sender.tab && sender.tab.url) || '').hostname);
+  } catch (e) { return null; }
+}
+
 async function tickInner(kind, sender) {
   {
+    // A page that is not (or no longer) on the tracked list is never counted.
+    const site = siteOf(sender);
+    if (!site) return { tracked: false };
     const s = await loadMerged();
     const real = Date.now();
     const n = nowOf(s);
@@ -280,6 +279,9 @@ async function tickInner(kind, sender) {
     }
     enforceTab(sender.tab && sender.tab.id, st.locked).catch(() => {});
     lastError = null;
+    st.tracked = true;
+    st.siteName = site.name;
+    st.notice = pickNotice(s);
     return st;
   }
 }
@@ -339,6 +341,7 @@ async function handleDebug(msg) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const fromPage = !sender.tab; // extension popup (not a content script)
   (async () => {
+    await ready; // effective settings are loaded before any message is answered
     switch (msg && msg.type) {
       case 'tick':
       case 'poll':
@@ -369,6 +372,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
           return publicStatus(s);
         });
+      case 'dismissNotice':
+        if (fromPage) return { error: 'not allowed' };
+        return withLock(async () => {
+          const s = await load();
+          const id = String(msg.id || '').slice(0, 100);
+          if (id) markSeen(s, id);
+          const pk = s.pendingNotice && s.pendingNotice.kind;
+          if ((id.indexOf('install:') === 0 && pk === 'newInstall') || (id.indexOf('update:') === 0 && pk === 'update')) delete s.pendingNotice;
+          await save(s);
+          return { ok: true };
+        });
       case 'setTimerHidden':
         return withLock(async () => {
           const s = await load();
@@ -384,6 +398,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (remoteMem) remoteMem.at = 0;
           return debugStatus(await loadMerged());
         }
+        if (msg.op === 'fetchSettings') { // network call outside the lock
+          const r = await fetchSettings();
+          return Object.assign(debugStatus(await loadMerged()), { fetchResult: r });
+        }
+        if (msg.op === 'simNotice' || msg.op === 'resetNotices') {
+          await withLock(async () => {
+            const s = await load();
+            s.noticesSeen = {};
+            delete s.pendingNotice;
+            if (msg.op === 'simNotice') s.pendingNotice = { kind: msg.kind === 'update' ? 'update' : 'newInstall', at: Date.now() };
+            await save(s);
+          });
+          return debugStatus(await loadMerged());
+        }
         return handleDebug(msg);
       default:
         return { error: 'unknown' };
@@ -392,9 +420,160 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async response
 });
 
+/* ---------- notices (optional banners) ---------- */
+const NOTICE_WINDOW_MS = 24 * 3600 * 1000; // an install/update notice must be shown within a day
+function cleanMsg(m) { return typeof m === 'string' ? m.trim().slice(0, 500) : ''; }
+function noticeId(kind, n) { return kind + ':' + (n.id ? String(n.id).slice(0, 60) : SL.hashString(n.message)); }
+function markSeen(s, id) {
+  s.noticesSeen = s.noticesSeen || {};
+  s.noticesSeen[id] = Date.now();
+  const ids = Object.keys(s.noticesSeen);
+  if (ids.length > 50) ids.sort((a, b) => s.noticesSeen[a] - s.noticesSeen[b]).slice(0, ids.length - 50).forEach((k) => delete s.noticesSeen[k]);
+}
+function pickNotice(s) {
+  const N = (SL.getConfig() || {}).notices || {};
+  const seen = s.noticesSeen || {};
+  const p = s.pendingNotice;
+  const fresh = !!p && Date.now() - p.at < NOTICE_WINDOW_MS;
+  const found = [];
+  if (fresh && p.kind === 'newInstall') {
+    const m = cleanMsg(N.newInstall && N.newInstall.message);
+    if (m) found.push({ id: noticeId('install', { message: m }), kind: 'newInstall', message: m });
+  }
+  const u = N.update;
+  const um = cleanMsg(u && u.message);
+  // update notice: right after an extension update, or when the central JSON supplies a new one
+  if (um && ((fresh && p.kind === 'update') || (u && u.remote))) {
+    found.push({ id: noticeId('update', { message: um, id: u.id }), kind: 'update', message: um });
+  }
+  return found.find((n) => !seen[n.id]) || null;
+}
+
+/* ---------- central settings (JSON on GitHub) ---------- */
+const SETTINGS_KEY = 'sl_settings';
+const REMOTE = C.remote || {};
+const REFRESH_MS = Math.max(1, Number(REMOTE.refreshMinutes) || 30) * 60 * 1000;
+let settings = {};           // last accepted record: { data, hash, version, fetchedAt, checkedAt, error, problems }
+let fetching = false;
+
+function applyEffective(rec) {
+  settings = rec || {};
+  SL.setConfig(SL.buildConfig(C, settings.data));
+}
+const ready = chrome.storage.local.get(SETTINGS_KEY)
+  .then((o) => applyEffective(o[SETTINGS_KEY]))
+  .catch((e) => { applyEffective(null); lastError = 'settings load: ' + (e && e.message || e); });
+
+function settingsInfo() {
+  return {
+    enabled: !!(REMOTE.enabled && REMOTE.url),
+    source: settings.hash ? 'central' : 'built-in',
+    version: settings.version || null,
+    changedAt: settings.fetchedAt || null,
+    checkedAt: settings.checkedAt || null,
+    error: settings.error || null,
+    problems: settings.problems || [],
+  };
+}
+
+async function fetchSettings() {
+  if (!REMOTE.enabled || !REMOTE.url) return { skipped: true };
+  if (fetching) return { busy: true };
+  fetching = true;
+  try {
+    await ready;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    let raw;
+    try {
+      const res = await fetch(REMOTE.url, { cache: 'no-cache', signal: ctrl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const text = await res.text();
+      if (text.length > 300000) throw new Error('settings file too large');
+      raw = JSON.parse(text);
+    } finally { clearTimeout(timer); }
+
+    const { data, problems } = SL.sanitizeRemote(raw, settings.data);
+    const hash = SL.hashString(JSON.stringify(data));
+    const changed = settings.hash !== hash;
+    const rec = {
+      data, hash, problems,
+      version: data.version || null,
+      fetchedAt: changed ? Date.now() : settings.fetchedAt || Date.now(),
+      checkedAt: Date.now(),
+      error: null,
+    };
+    await chrome.storage.local.set({ [SETTINGS_KEY]: rec }); // remembered until the JSON changes again
+    applyEffective(rec);
+    await afterSettingsApplied(changed);
+    return { ok: true, changed, problems };
+  } catch (e) {
+    // Unavailable / invalid: keep using the last good copy (or the built-in defaults).
+    const rec = Object.assign({}, settings, { checkedAt: Date.now(), error: String((e && e.message) || e) });
+    settings = rec;
+    chrome.storage.local.set({ [SETTINGS_KEY]: rec }).catch(() => {});
+    return { ok: false, error: rec.error };
+  } finally {
+    fetching = false;
+  }
+}
+
+async function afterSettingsApplied(changed) {
+  await withLock(async () => {
+    const s = await load();
+    let dirty = false;
+    if (changed) { s.dismissed = {}; dirty = true; } // thresholds may have changed
+    if (s.suppressRemoteNotice) { // brand-new install: don't announce what already exists
+      const u = (SL.getConfig().notices || {}).update;
+      if (u && u.remote && cleanMsg(u.message)) markSeen(s, noticeId('update', { message: cleanMsg(u.message), id: u.id }));
+      s.suppressRemoteNotice = false;
+      dirty = true;
+    }
+    if (dirty) await save(s);
+  });
+  await syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
+}
+
+/* ---------- content scripts follow the tracked-site list ---------- */
+let csChain = Promise.resolve();
+function syncContentScripts(forceInject) {
+  const run = csChain.then(() => doSyncContentScripts(forceInject));
+  csChain = run.catch(() => {});
+  return run;
+}
+async function doSyncContentScripts(forceInject) {
+  const matches = SL.enabledHosts().map((h) => 'https://*.' + h + '/*').sort();
+  const existing = await chrome.scripting.getRegisteredContentScripts();
+  const main = existing.find((x) => x.id === 'sl-main');
+  const content = existing.find((x) => x.id === 'sl-content');
+  const same = !!(main && content) && JSON.stringify((content.matches || []).slice().sort()) === JSON.stringify(matches);
+  if (same && !forceInject) return;
+  if (!same) {
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: existing.map((x) => x.id) });
+    if (matches.length) {
+      await chrome.scripting.registerContentScripts([
+        { id: 'sl-main', matches, js: ['pip-guard.js'], runAt: 'document_start', world: 'MAIN', persistAcrossSessions: true },
+        { id: 'sl-content', matches, js: ['core.js', 'content.js'], runAt: 'document_start', persistAcrossSessions: true },
+      ]);
+    }
+  }
+  // Pages that were already open don't get registered scripts until reload: inject now.
+  if (matches.length) {
+    const tabs = await chrome.tabs.query({ url: matches });
+    for (const t of tabs) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['pip-guard.js'], world: 'MAIN' });
+        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['core.js', 'content.js'] });
+      } catch (e) { /* tab not injectable (discarded, error page, ...) */ }
+    }
+  }
+}
+
 /* ---------- housekeeping: sync upload, stale badge, mute hidden tabs ---------- */
 async function housekeeping() {
+  await ready;
   await flushSync(true).catch(() => {});
+  await syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
   const s = await loadMerged();
   const st = SL.computeStatus(s, nowOf(s), Date.now());
   if (!st.counting && !st.locked) clearBadge();
@@ -404,12 +583,43 @@ async function housekeeping() {
   for (const t of tabs) await enforceTab(t.id, st.locked);
 }
 
-function ensureAlarm() {
+function ensureAlarms() {
   chrome.alarms.get('sl-housekeeping', (a) => {
     if (!a) chrome.alarms.create('sl-housekeeping', { periodInMinutes: 0.5 });
   });
+  chrome.alarms.get('sl-settings', (a) => {
+    const period = REFRESH_MS / 60000;
+    if (!a || Math.abs((a.periodInMinutes || 0) - period) > 0.001) chrome.alarms.create('sl-settings', { periodInMinutes: period });
+  });
 }
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'sl-housekeeping') housekeeping(); });
-chrome.runtime.onInstalled.addListener(ensureAlarm); // data survives updates
-chrome.runtime.onStartup.addListener(ensureAlarm);
-ensureAlarm();
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === 'sl-housekeeping') housekeeping();
+  if (a.name === 'sl-settings') fetchSettings();
+});
+
+chrome.runtime.onInstalled.addListener((details) => {
+  ensureAlarms();
+  (async () => {
+    await ready;
+    await withLock(async () => {
+      const s = await load();
+      if (details.reason === 'install') {
+        s.pendingNotice = { kind: 'newInstall', at: Date.now() };
+        s.suppressRemoteNotice = true;
+      } else if (details.reason === 'update') {
+        s.pendingNotice = { kind: 'update', at: Date.now(), version: chrome.runtime.getManifest().version };
+      }
+      await save(s);
+    });
+    await syncContentScripts(true).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
+    await fetchSettings();
+  })().catch((e) => { lastError = 'install: ' + (e && e.message || e); });
+});
+chrome.runtime.onStartup.addListener(ensureAlarms);
+ensureAlarms();
+
+// Every time the worker wakes: make sure the scripts match the settings, and refresh if stale.
+ready.then(() => {
+  syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
+  if (Date.now() - (settings.checkedAt || 0) > REFRESH_MS) fetchSettings();
+});

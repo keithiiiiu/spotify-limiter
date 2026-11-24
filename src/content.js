@@ -1,4 +1,4 @@
-/* Runs on open.spotify.com. Reports "I'm visible" once a second and draws the UI.
+/* Runs on the tracked music sites (the background worker registers it). Reports "I'm visible" once a second and draws the UI.
  * All decisions (counting, locking) are made by the background worker. */
 (function () {
   'use strict';
@@ -6,10 +6,9 @@
   window.__slLoaded = true;
 
   const SL = self.SL;
-  if (!SL) { console.error('[limiter] core.js / config.js not available - content script stopped'); return; }
-  // Only act on sites enabled in config.js (the manifest may list more than are enabled).
-  const site = SL.siteForHost(location.hostname);
-  if (!site) return;
+  if (!SL) { console.error('[limiter] core.js not available - content script stopped'); return; }
+  let siteName = 'This site'; // filled in from the background worker's answer
+  let tracked = true;
   let locked = false;
   let dead = false; // extension was reloaded/updated: this copy of the script is orphaned
 
@@ -42,12 +41,16 @@
 <style>
   :host { all: initial; }
   * { box-sizing: border-box; font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
-  .banner { position: fixed; top: 0; left: 0; right: 0; z-index: 2147483646; display: none; align-items: center;
+  .banners { position: fixed; top: 0; left: 0; right: 0; z-index: 2147483646; display: flex; flex-direction: column;
+    pointer-events: none; }
+  .banner { pointer-events: auto; display: none; align-items: center;
     justify-content: center; gap: 12px; background: #f5b942; color: #1c1500; padding: 7px 12px 7px 16px;
     font-size: 14px; font-weight: 600; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
+  .banner.notice { background: #cfe3ff; color: #0b2447; font-weight: 500; }
   .banner button { all: unset; cursor: pointer; flex: none; width: 24px; height: 24px; line-height: 24px;
     text-align: center; border-radius: 50%; font-size: 18px; color: #1c1500; }
   .banner button:hover, .banner button:focus-visible { background: rgba(0,0,0,.15); }
+  .banner.notice button { color: #0b2447; }
   .timer { position: fixed; right: 16px; bottom: 104px; z-index: 2147483645; display: none; align-items: center;
     gap: 8px; background: rgba(20,22,26,.94); color: #f2f2f2; border: 1px solid #343840; border-radius: 999px;
     padding: 6px 6px 6px 12px; font-size: 13px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
@@ -80,9 +83,15 @@
   .foot { font-size: 12.5px; color: #8b919c; margin: 22px 0 0; line-height: 1.5; }
 </style>
 
-<div class="banner" id="banner" role="alert">
-  <span id="btext"></span>
-  <button id="bclose" title="Close" aria-label="Close warning">\u00d7</button>
+<div class="banners">
+  <div class="banner notice" id="notice" role="status">
+    <span id="ntext"></span>
+    <button id="nclose" title="Close" aria-label="Close message">\u00d7</button>
+  </div>
+  <div class="banner" id="banner" role="alert">
+    <span id="btext"></span>
+    <button id="bclose" title="Close" aria-label="Close warning">\u00d7</button>
+  </div>
 </div>
 
 <div class="timer" id="timer">
@@ -105,7 +114,7 @@
 </div>`;
 
   const $ = (id) => root.getElementById(id);
-  const banner = $('banner'), btext = $('btext'), timer = $('timer'), dot = $('dot'), ttext = $('ttext'),
+  const banner = $('banner'), btext = $('btext'), notice = $('notice'), ntext = $('ntext'), timer = $('timer'), dot = $('dot'), ttext = $('ttext'),
         lock = $('lock'), why = $('why'), when = $('when'), usage = $('usage'), foot = $('foot');
 
   function attach() {
@@ -121,6 +130,12 @@
     if (bannerFor) {
       send({ type: 'dismissWarning', limitId: bannerFor.id, level: bannerFor.level });
     }
+  });
+
+  let noticeId = null;
+  $('nclose').addEventListener('click', () => {
+    notice.style.display = 'none';
+    if (noticeId) send({ type: 'dismissNotice', id: noticeId });
   });
 
   $('thide').addEventListener('click', () => {
@@ -167,7 +182,7 @@
 
   /* ---------- render ---------- */
   function renderLock(st) {
-    $('ltitle').textContent = site.name + ' is locked';
+    $('ltitle').textContent = siteName + ' is locked';
     why.textContent = st.reached.length === 1
       ? 'You have used your ' + st.reached[0].noun + ' streaming allowance of ' + SL.fmtDur(st.reached[0].limitMs) + '.'
       : 'You have used your streaming allowance for: ' + st.reached.map((l) => l.noun + ' (' + SL.fmtDur(l.limitMs) + ')').join(', ') + '.';
@@ -207,14 +222,34 @@
       '). All tracked streaming sites share the same allowance.';
   }
 
+  function hideAll() {
+    locked = false;
+    banner.style.display = 'none';
+    notice.style.display = 'none';
+    lock.style.display = 'none';
+    timer.style.display = 'none';
+  }
+
   function render(st) {
+    tracked = st.tracked !== false;
+    if (!tracked) { hideAll(); return; } // site was removed from the tracked list
+    if (st.siteName) siteName = st.siteName;
     locked = st.locked;
+
+    if (st.notice && st.notice.message) {
+      noticeId = st.notice.id;
+      ntext.textContent = st.notice.message; // plain text only
+      notice.style.display = 'flex';
+    } else {
+      noticeId = null;
+      notice.style.display = 'none';
+    }
 
     if (st.warn && st.warnLimit) {
       const l = st.warnLimit;
       bannerFor = { id: l.id, level: l.level };
       btext.textContent = 'Streaming time warning: ' + Math.floor(l.pct * 100) + '% of your ' + l.noun +
-        ' limit is used. ' + SL.fmtDur(l.remainingMs, true) + ' left before ' + site.name + ' locks.';
+        ' limit is used. ' + SL.fmtDur(l.remainingMs, true) + ' left before ' + siteName + ' locks.';
       banner.style.display = 'flex';
     } else {
       bannerFor = null;
@@ -291,7 +326,7 @@
     } catch (e) {
       console.error('[limiter] render failed', e); // keep the loop alive no matter what
     }
-    if (gen === loopGen) schedule(onScreen ? 1000 : 5000);
+    if (gen === loopGen) schedule(!tracked ? 15000 : onScreen ? 1000 : 5000);
   }
 
   document.addEventListener('visibilitychange', () => {

@@ -14,6 +14,7 @@
   <p id="msg" class="msg"></p>
   <section id="limits"></section>
   <p id="info" class="info"></p>
+  <p id="settingsInfo" class="info"></p>
 
   <button id="toggleTimer" class="btn" type="button">Hide on-page timer</button>
 
@@ -41,6 +42,12 @@
     <button id="dbgClear" type="button" class="danger">Clear all usage</button>
 
     <div class="row"><button id="dbgSync" type="button">Upload to sync now</button></div>
+    <div class="row"><button id="dbgFetch" type="button">Refresh central settings now</button></div>
+    <div class="row">
+      <button id="dbgSimInstall" type="button">Test "new install" notice</button>
+      <button id="dbgSimUpdate" type="button">Test "update" notice</button>
+    </div>
+    <div class="row"><button id="dbgResetNotices" type="button">Reset notices</button></div>
     <p id="dbgDevices" class="info"></p>
 
     <details><summary>Stored usage (all devices)</summary><pre id="dbgRaw"></pre></details>

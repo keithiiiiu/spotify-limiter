@@ -1,9 +1,17 @@
 /* =============================================================================
- *  SPOTIFY TIME LIMITER - CONFIGURATION
+ *  SPOTIFY TIME LIMITER - BUILT-IN SETTINGS
  *
- *  Everything the extension does is controlled from this file. Students have no
- *  settings. To change anything: edit this file, bump "version" in
- *  manifest.json, run pack.sh / pack.ps1, publish the new package.
+ *  These are the DEFAULTS shipped inside the extension. They are used:
+ *    - on a fresh install, until the central settings file has been downloaded
+ *    - whenever the central settings file is unavailable and nothing has been
+ *      downloaded yet
+ *
+ *  Normal operation: the extension downloads a settings JSON (see "remote"
+ *  below) and remembers the last good copy. The JSON can override: sites,
+ *  limits, warning, schoolHours, holidays and notices. Anything the JSON does
+ *  not mention keeps the value from this file. See README.md for the format.
+ *
+ *  Students have no settings of their own.
  * ========================================================================== */
 self.SL_CONFIG = {
 
@@ -15,10 +23,6 @@ self.SL_CONFIG = {
    * hosts   : domains; sub-domains match too (soundcloud.com also covers
    *           on.soundcloud.com)
    * enabled : false = the extension does nothing on this site
-   *
-   * To add a site that is NOT in this list you must ALSO add it to
-   * "host_permissions" and both "content_scripts" blocks in manifest.json
-   * (browsers fix those at install time).
    *
    * YouTube (www.youtube.com) is intentionally not listed because it is used
    * for schoolwork. YouTube MUSIC is.
@@ -110,6 +114,34 @@ self.SL_CONFIG = {
    */
   sync: { enabled: true },
 
+  /* ---- Central settings (JSON hosted on GitHub) ----------------------------
+   * url             : raw link to the settings JSON
+   * refreshMinutes  : how often each device checks for changes (minimum 1)
+   * The last good copy is stored on the device and used whenever the file
+   * can't be reached. enabled: false = ignore the central file completely.
+   */
+  remote: {
+    enabled: true,
+    url: 'https://raw.githubusercontent.com/keithiiiiu/spotify-limiter/refs/heads/main/extension/settings.json',
+    refreshMinutes: 30,
+  },
+
+  /* ---- Notification banners (all optional) --------------------------------
+   * Empty message = nothing is shown. Each distinct message is shown once per
+   * device, then never again. Plain text only (max 500 characters).
+   *
+   * newInstall.message : shown once, ONLY on a brand-new install
+   * update.message     : shown once, right after the extension is updated to a
+   *                      new version (never on a new install). Leave it empty
+   *                      for versions you don't want to announce.
+   * The settings JSON can supply both too (it takes priority) - an update
+   * message that arrives through the JSON is also shown once when it changes.
+   */
+  notices: {
+    newInstall: { message: '' },
+    update:     { message: '' },
+  },
+
   /* ---- Test controls -----------------------------------------------------
    * When enabled, the toolbar popup shows a "Test controls" panel: fake the
    * date/time, speed up counting, add / clear usage.
@@ -117,5 +149,5 @@ self.SL_CONFIG = {
    * pack.sh / pack.ps1 flip this to false automatically for production builds
    * (they look for the @DEBUG_FLAG marker - keep it on this line).
    */
-  debug: { enabled: false }, // @DEBUG_FLAG
+  debug: { enabled: true }, // @DEBUG_FLAG
 };

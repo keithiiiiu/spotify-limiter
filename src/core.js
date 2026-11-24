@@ -1,8 +1,11 @@
 /* Shared logic (background, content script, popup). No side effects. */
 (function () {
   'use strict';
-  const C = self.SL_CONFIG;
-  if (!C) { console.error('[limiter] config.js did not load before core.js'); return; }
+  // C = the EFFECTIVE settings (built-in defaults + central JSON). The background
+  // worker replaces it with setConfig(); other pages only use the pure helpers.
+  let C = self.SL_CONFIG || null;
+  function setConfig(cfg) { C = cfg; }
+  function getConfig() { return C; }
   const MIN = 60000;
   const HOUR = 3600000;
   const MAX_GAP = 3500; // ms without a tick before we stop saying "counting"
@@ -191,7 +194,172 @@
       timerHidden: !!s.timerHidden,
       onlyDuringSchoolHours: onlySchool,
       periodsText: fmtPeriods(),
+      daysText: C.schoolHours.days.map((d) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d]).join(', '),
     };
+  }
+
+  /* ---------- central settings (JSON on GitHub): validate + merge ---------- */
+  const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const YMD = /^\d{4}-\d{2}-\d{2}$/;
+  const HOSTRE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+  const isNum = (x) => typeof x === 'number' && isFinite(x);
+  const isStr = (x, max) => typeof x === 'string' && x.length <= (max || 200);
+  function validDate(s) {
+    if (typeof s !== 'string' || !YMD.test(s)) return false;
+    const p = s.split('-').map(Number);
+    const t = new Date(p[0], p[1] - 1, p[2]);
+    return t.getFullYear() === p[0] && t.getMonth() === p[1] - 1 && t.getDate() === p[2];
+  }
+  function hashString(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+
+  // Returns { data, problems }. A section that fails validation is ignored and the
+  // previously accepted value (if any) is kept; other sections still apply.
+  // Throws if the file is not a JSON object at all.
+  function sanitizeRemote(raw, previous) {
+    previous = previous || {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('settings file must be a JSON object');
+    const data = {};
+    const problems = [];
+    function section(name, fn) {
+      if (!(name in raw)) return;
+      try { data[name] = fn(raw[name]); }
+      catch (e) {
+        problems.push(name + ': ' + e.message);
+        if (previous[name] !== undefined) data[name] = previous[name];
+      }
+    }
+    const obj = (v) => { if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('must be an object'); return v; };
+
+    section('version', (v) => {
+      if (!(isStr(v, 40) || isNum(v))) throw new Error('must be text or a number');
+      return String(v);
+    });
+
+    section('sites', (v) => {
+      if (!Array.isArray(v) || v.length > 200) throw new Error('must be an array (max 200)');
+      return v.map((s, i) => {
+        if (!s || !isStr(s.name, 60) || !s.name.trim() || !Array.isArray(s.hosts) || !s.hosts.length || s.hosts.length > 20) {
+          throw new Error('entry ' + i + ' needs "name" and a non-empty "hosts" list');
+        }
+        const hosts = s.hosts.map((h) => {
+          const x = String(h).trim().toLowerCase().replace(/^\*\./, '');
+          if (!HOSTRE.test(x)) throw new Error('bad host "' + h + '" (use e.g. open.spotify.com, no https://)');
+          return x;
+        });
+        return { name: s.name.trim(), hosts, enabled: s.enabled !== false };
+      });
+    });
+
+    section('limits', (v) => {
+      obj(v);
+      const out = {};
+      Object.keys(v).forEach((id) => {
+        if (!/^[a-z][a-z0-9_]{0,19}$/i.test(id)) throw new Error('bad limit name "' + id + '"');
+        const l = obj(v[id]);
+        const o = {};
+        if ('enabled' in l) { if (typeof l.enabled !== 'boolean') throw new Error(id + '.enabled must be true/false'); o.enabled = l.enabled; }
+        if ('hours' in l) { if (!isNum(l.hours) || l.hours < 0 || l.hours > 1000) throw new Error(id + '.hours must be 0-1000'); o.hours = l.hours; }
+        if ('days' in l) { if (!Number.isInteger(l.days) || l.days < 1 || l.days > 366) throw new Error(id + '.days must be 1-366'); o.days = l.days; }
+        out[id] = o;
+      });
+      return out;
+    });
+
+    section('warning', (v) => {
+      obj(v);
+      const o = {};
+      if ('enabled' in v) { if (typeof v.enabled !== 'boolean') throw new Error('enabled must be true/false'); o.enabled = v.enabled; }
+      if ('thresholds' in v) {
+        if (!Array.isArray(v.thresholds) || v.thresholds.length > 12 || v.thresholds.some((t) => !isNum(t) || t < 1 || t > 100)) {
+          throw new Error('thresholds must be up to 12 numbers between 1 and 100');
+        }
+        o.thresholds = v.thresholds.slice();
+      }
+      return o;
+    });
+
+    section('schoolHours', (v) => {
+      obj(v);
+      const o = {};
+      if ('days' in v) {
+        if (!Array.isArray(v.days) || !v.days.length || v.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
+          throw new Error('days must be numbers 0-6 (0 = Sunday)');
+        }
+        o.days = Array.from(new Set(v.days));
+      }
+      if ('periods' in v) {
+        if (!Array.isArray(v.periods) || !v.periods.length || v.periods.length > 8) throw new Error('periods must be 1-8 entries');
+        const list = v.periods.map((p) => {
+          if (!p || !HHMM.test(p.start) || !HHMM.test(p.end) || p.start >= p.end) throw new Error('each period needs start < end as "HH:MM"');
+          return { start: p.start, end: p.end };
+        }).sort((a, b) => (a.start < b.start ? -1 : 1));
+        for (let i = 1; i < list.length; i++) if (list[i].start < list[i - 1].end) throw new Error('periods overlap');
+        o.periods = list;
+      }
+      return o;
+    });
+
+    section('holidays', (v) => {
+      if (!Array.isArray(v) || v.length > 400) throw new Error('must be an array (max 400)');
+      return v.map((h, i) => {
+        if (typeof h === 'string') { if (!validDate(h)) throw new Error('entry ' + i + ': bad date'); return h; }
+        const o = obj(h);
+        const name = o.name === undefined ? undefined : String(o.name).slice(0, 80);
+        if (o.date !== undefined) { if (!validDate(o.date)) throw new Error('entry ' + i + ': bad date'); return { date: o.date, name }; }
+        if (!validDate(o.from) || !validDate(o.to) || o.from > o.to) throw new Error('entry ' + i + ': needs valid from <= to');
+        return { from: o.from, to: o.to, name };
+      });
+    });
+
+    section('notices', (v) => {
+      obj(v);
+      const o = {};
+      ['update', 'newInstall'].forEach((k) => {
+        if (!(k in v)) return;
+        const n = obj(v[k]);
+        if (!isStr(n.message || '', 500)) throw new Error(k + '.message must be text up to 500 characters');
+        o[k] = { message: String(n.message || '').trim() };
+        if (k === 'update' && n.id !== undefined) {
+          if (!isStr(String(n.id), 60)) throw new Error('update.id too long');
+          o[k].id = String(n.id);
+        }
+      });
+      return o;
+    });
+
+    return { data, problems };
+  }
+
+  // defaults (config.js) + accepted remote sections -> effective settings.
+  function buildConfig(defaults, remote) {
+    const cfg = JSON.parse(JSON.stringify(defaults));
+    remote = remote || {};
+    if (remote.sites) cfg.sites = remote.sites.map((s) => Object.assign({}, s));
+    if (remote.limits) {
+      Object.keys(remote.limits).forEach((id) => {
+        const m = Object.assign({}, cfg.limits[id] || {}, remote.limits[id]);
+        if (isNum(m.hours) && Number.isInteger(m.days)) { if (m.enabled === undefined) m.enabled = true; cfg.limits[id] = m; }
+      });
+    }
+    if (remote.warning) cfg.warning = Object.assign({}, cfg.warning, remote.warning);
+    if (remote.schoolHours) cfg.schoolHours = Object.assign({}, cfg.schoolHours, remote.schoolHours);
+    if (remote.holidays) cfg.holidays = JSON.parse(JSON.stringify(remote.holidays));
+    cfg.notices = cfg.notices || {};
+    cfg.notices.update = cfg.notices.update || { message: '' };
+    cfg.notices.newInstall = cfg.notices.newInstall || { message: '' };
+    if (remote.notices) {
+      if (remote.notices.update && remote.notices.update.message) {
+        cfg.notices.update = { message: remote.notices.update.message, id: remote.notices.update.id, remote: true };
+      }
+      if (remote.notices.newInstall && remote.notices.newInstall.message) {
+        cfg.notices.newInstall = { message: remote.notices.newInstall.message, remote: true };
+      }
+    }
+    return cfg;
   }
 
   /* ---------- formatting ---------- */
@@ -225,7 +393,8 @@
     dateKey, startOfDay, addDays, atTime, toLocalInput,
     isSchoolDay, isSchoolTime, nextSchoolStart, holidayFor, periods, fmtPeriods,
     enabledSites, enabledHosts, siteForHost,
-    computeStatus, limitDefs,
+    computeStatus, limitDefs, setConfig, getConfig,
+    sanitizeRemote, buildConfig, hashString,
     fmtClock, fmtDur, badgeText, fmtWhen,
   };
 })();

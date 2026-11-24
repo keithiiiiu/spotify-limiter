@@ -1,0 +1,53 @@
+{
+  "version": 1,
+
+  "sites": [
+    { "name": "Spotify",       "hosts": ["open.spotify.com"],                    "enabled": true },
+    { "name": "YouTube Music", "hosts": ["music.youtube.com"],                   "enabled": true },
+    { "name": "Apple Music",   "hosts": ["music.apple.com"],                     "enabled": true },
+    { "name": "Amazon Music",  "hosts": ["music.amazon.com", "music.amazon.ca"], "enabled": true },
+    { "name": "Pandora",       "hosts": ["pandora.com"],                         "enabled": true },
+    { "name": "SoundCloud",    "hosts": ["soundcloud.com"],                      "enabled": true },
+    { "name": "Deezer",        "hosts": ["deezer.com"],                          "enabled": true },
+    { "name": "TIDAL",         "hosts": ["listen.tidal.com", "tidal.com"],       "enabled": true },
+    { "name": "iHeartRadio",   "hosts": ["iheart.com"],                          "enabled": true },
+    { "name": "TuneIn",        "hosts": ["tunein.com"],                          "enabled": true }
+  ],
+
+  "limits": {
+    "daily":   { "enabled": true,  "hours": 1,  "days": 1  },
+    "weekly":  { "enabled": true,  "hours": 3,  "days": 7  },
+    "monthly": { "enabled": false, "hours": 15, "days": 30 }
+  },
+
+  "warning": { "enabled": true, "thresholds": [75, 90, 95] },
+
+  "schoolHours": {
+    "days": [1, 2, 3, 4, 5],
+    "periods": [
+      { "start": "08:45", "end": "11:45" },
+      { "start": "12:45", "end": "15:30" }
+    ]
+  },
+
+  "holidays": [
+    { "date": "2026-10-12", "name": "Thanksgiving" },
+    { "date": "2026-11-06", "name": "PA Day" },
+    { "date": "2026-11-11", "name": "Remembrance Day" },
+    { "from": "2026-12-18", "to": "2027-01-01", "name": "Winter break" },
+    { "date": "2027-01-22", "name": "PA Day" },
+    { "date": "2027-02-12", "name": "PA Day" },
+    { "date": "2027-02-15", "name": "Family Day" },
+    { "from": "2027-03-15", "to": "2027-03-29", "name": "March break" },
+    { "date": "2027-04-02", "name": "Good Friday" },
+    { "date": "2027-04-05", "name": "Easter Monday" },
+    { "date": "2027-05-14", "name": "PA Day" },
+    { "date": "2027-05-24", "name": "Victoria Day" },
+    { "from": "2027-06-21", "to": "2027-06-25", "name": "Last week of school" }
+  ],
+
+  "notices": {
+    "newInstall": { "message": "" },
+    "update":     { "id": "", "message": "" }
+  }
+}
