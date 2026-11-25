@@ -11,7 +11,7 @@
     { "name": "Deezer",        "hosts": ["deezer.com"],                          "enabled": true },
     { "name": "TIDAL",         "hosts": ["listen.tidal.com", "tidal.com"],       "enabled": true },
     { "name": "iHeartRadio",   "hosts": ["iheart.com"],                          "enabled": true },
-    { "name": "TuneIn",        "hosts": ["tunein.com"],                          "enabled": true }
+    { "name": "TuneIn",        "hosts": ["tunein.com"],                          "enabled": true },
     { "name": "test",          "hosts": ["edsby.com"],               "enabled": true }
   ],
 
