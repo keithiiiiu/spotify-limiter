@@ -17,6 +17,7 @@ self.SL_CONFIG = {
 
   /* ---- Sites that are tracked ---------------------------------------------
    * Time on ALL enabled sites below counts together towards the same limits.
+   * (Time on every other site is recorded too but doesn't count until the site is added here.)
    * (Music sites only - video streaming sites are intentionally not tracked.)
    *
    * name    : shown to the student
@@ -97,6 +98,19 @@ self.SL_CONFIG = {
     { from: '2027-06-21', to: '2027-06-25', name: 'Last week of school' },
   ],
 
+  /* ---- Activity history -------------------------------------------------
+   * The extension records how long each website (host name only - never the
+   * page address or content) is on screen during school hours, on EVERY site.
+   * Only the sites on the tracked list count towards the limits, but because
+   * the history is kept, a site added to the list later immediately counts
+   * its earlier time too (within the limit windows).
+   *
+   * days : history older than this many days is deleted from the device and
+   *        from browser sync. Keep it >= the longest limit window (30 if the
+   *        monthly limit is ever switched on) or old time will be forgotten.
+   */
+  retention: { days: 30 },
+
   /* ---- Enforcement -------------------------------------------------------
    * onlyDuringSchoolHours: true  -> the lock screen / banner only appear during
    *                                 school periods; sites are free at lunch and
@@ -112,7 +126,13 @@ self.SL_CONFIG = {
    * storage and adds up the totals of the user's other devices, so the limit
    * follows the student. Needs browser sync turned on for extension data.
    */
-  sync: { enabled: true },
+  sync: {
+    enabled: true,
+    // true  : upload per-site totals for ALL sites, so a site added to the list later
+    //         also counts its time recorded on this user's other devices.
+    // false : upload only sites currently on the tracked list.
+    allSites: true,
+  },
 
   /* ---- Central settings (JSON hosted on GitHub) ----------------------------
    * url             : raw link to the settings JSON

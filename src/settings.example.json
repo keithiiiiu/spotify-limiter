@@ -22,6 +22,8 @@
 
   "warning": { "enabled": true, "thresholds": [75, 90, 95] },
 
+  "retention": { "days": 30 },
+
   "schoolHours": {
     "days": [1, 2, 3, 4, 5],
     "periods": [

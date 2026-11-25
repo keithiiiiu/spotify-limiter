@@ -35,7 +35,8 @@
 
     <label class="chk"><input type="checkbox" id="dbgIgnore"> Ignore school hours</label>
 
-    <label>Add usage (minutes, can be negative)
+    <label>Add time on a site (minutes, can be negative)
+      <input type="text" id="dbgHost" value="open.spotify.com" spellcheck="false">
       <span class="row"><input type="number" id="dbgMin" value="30"><input type="date" id="dbgDate"><button id="dbgAdd" type="button">Add</button></span>
     </label>
 
@@ -50,7 +51,7 @@
     <div class="row"><button id="dbgResetNotices" type="button">Reset notices</button></div>
     <p id="dbgDevices" class="info"></p>
 
-    <details><summary>Stored usage (all devices)</summary><pre id="dbgRaw"></pre></details>
+    <details><summary>Stored history (all devices)</summary><pre id="dbgRaw"></pre></details>
   </section>
 
   <script src="config.js"></script>

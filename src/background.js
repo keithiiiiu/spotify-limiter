@@ -4,8 +4,6 @@ importScripts('config.js', 'core.js');
 const C = self.SL_CONFIG; // built-in defaults (debug / sync / remote url live only here)
 const SL = self.SL;       // SL.getConfig() = EFFECTIVE settings (defaults + central JSON)
 const KEY = 'sl_state';
-const KEEP_DAYS = 400;          // local history kept (tiny)
-const SYNC_DAYS = 40;           // days uploaded to browser sync (windows are max 30)
 const SYNC_FLUSH_MS = 60 * 1000; // normal upload interval while counting
 const SYNC_FLOOR_MS = 15 * 1000; // never write to sync more often than this (quota)
 
@@ -36,12 +34,11 @@ function withLock(fn) {
 async function load() {
   const o = await chrome.storage.local.get(KEY);
   const s = o[KEY] || {};
-  s.usage = s.usage || {};
   s.debug = Object.assign({ offsetMs: 0, speed: 1, ignoreSchoolHours: false }, s.debug);
-  s.lastTickReal = s.lastTickReal || 0;
+  s.lastTickReal = s.lastTickReal || 0; // last tick from a TRACKED site (drives "counting")
   s.timerHidden = !!s.timerHidden;
   s.dismissed = s.dismissed || {};
-  s.syncDirty = !!s.syncDirty;
+  s.dirtyDays = s.dirtyDays || {};      // day -> revision, waiting to be uploaded to browser sync
   s.usageRev = s.usageRev || 0;
   s.lastSyncWrite = s.lastSyncWrite || 0;
   if (!s.deviceId) {
@@ -56,20 +53,57 @@ function save(s) {
 }
 function nowOf(s) { return Date.now() + (C.debug.enabled ? s.debug.offsetMs || 0 : 0); }
 
-function prune(s, nowMs) {
-  const keys = Object.keys(s.usage);
-  if (keys.length <= KEEP_DAYS + 20) return;
-  const cutoff = SL.dateKey(SL.addDays(nowMs, -KEEP_DAYS));
-  keys.forEach((k) => { if (k < cutoff) delete s.usage[k]; });
+/* ---------- activity history: seconds per website per day (host names only) ----------
+ * One small storage key per day ("sl_day:2026-11-20" -> { "open.spotify.com": ms, ... }) so a
+ * tick only rewrites today's key. Everything older than retention.days is deleted. */
+const DAY_PREFIX = 'sl_day:';
+const EARLIER = '(earlier)'; // time carried over from versions that only kept a daily total
+let dayCache = null;         // Map<day, { host: ms }>
+const lastUntracked = new Map(); // host -> last tick time (de-duplicates tabs of the same site)
+
+async function days() {
+  if (!dayCache) {
+    const all = await chrome.storage.local.get(null);
+    const m = new Map();
+    Object.keys(all).forEach((k) => { if (k.indexOf(DAY_PREFIX) === 0) m.set(k.slice(DAY_PREFIX.length), all[k]); });
+    dayCache = m;
+  }
+  return dayCache;
+}
+async function persistDay(day) {
+  const m = await days();
+  if (m.has(day)) await chrome.storage.local.set({ [DAY_PREFIX + day]: m.get(day) });
+  else await chrome.storage.local.remove(DAY_PREFIX + day);
+}
+function hostOf(sender) {
+  try {
+    return new URL(sender.url || (sender.tab && sender.tab.url) || '').hostname.toLowerCase().replace(/^www\./, '');
+  } catch (e) { return ''; }
+}
+function retentionDays() {
+  const r = (SL.getConfig() || {}).retention;
+  return r && Number.isInteger(r.days) && r.days > 0 ? r.days : 30;
 }
 
-/* ---------- browser sync: one small item per device, merged on read ----------
- * Reading other devices' totals NEVER blocks counting or the popup: we serve the
- * last known copy (kept in storage.local) immediately and refresh it from
- * chrome.storage.sync in the background. */
+// Does a host count towards the limits RIGHT NOW? (re-evaluated whenever the list changes,
+// which is what makes earlier time on a newly added site count immediately)
+let trackedMemo = new Map();
+function isTracked(host) {
+  if (host === EARLIER) return true;
+  let v = trackedMemo.get(host);
+  if (v === undefined) { v = !!SL.siteForHost(host); trackedMemo.set(host, v); }
+  return v;
+}
+
+/* ---------- browser sync: small items per device and day, merged on read ----------
+ * Key  u:<device id>:<YYYY-MM-DD>  ->  { v: 2, h: { host: seconds } }
+ * (older versions wrote one item u:<device id> -> { d: { day: seconds } }; still read.)
+ * Reading other devices' totals NEVER blocks counting or the popup: we serve the last
+ * known copy (kept in storage.local) immediately and refresh it in the background. */
+const SYNC_ITEM = /^u:([0-9a-f-]{36}):(\d{4}-\d{2}-\d{2})$/;
 const REMOTE_KEY = 'sl_remote';
 const REMOTE_TTL_MS = 60 * 1000;
-let remoteMem = null;         // { items: { 'u:<id>': {d:{day:seconds}} }, at: ms }
+let remoteMem = null;         // { items: { key: value }, at: ms }
 let remoteRefreshing = false;
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -85,7 +119,7 @@ function refreshRemote() {
       const items = {};
       Object.keys(all).forEach((k) => {
         const v = all[k];
-        if (k.indexOf('u:') === 0 && v && typeof v.d === 'object') items[k] = v;
+        if (k.indexOf('u:') === 0 && v && (typeof v.h === 'object' || typeof v.d === 'object')) items[k] = v;
       });
       remoteMem = { items, at: Date.now() };
       await chrome.storage.local.set({ [REMOTE_KEY]: remoteMem });
@@ -106,48 +140,119 @@ async function readRemoteAll() {
   if (Date.now() - remoteMem.at > REMOTE_TTL_MS) refreshRemote(); // not awaited
   return remoteMem.items;
 }
-async function getRemote(ownId) {
-  const all = await readRemoteAll();
+
+// day -> ms that count towards the limits (tracked sites only), this device + the others.
+function poolByDay(local, remoteItems, ownId) {
   const out = {};
-  Object.keys(all).forEach((k) => { if (k !== 'u:' + ownId) out[k] = all[k]; });
-  return out;
-}
-function mergeUsage(local, remote) {
-  const all = Object.assign({}, local);
-  Object.keys(remote).forEach((k) => {
-    const d = remote[k].d;
-    Object.keys(d).forEach((day) => { all[day] = (all[day] || 0) + (Number(d[day]) || 0) * 1000; });
+  const add = (day, host, ms) => { if (isTracked(host)) out[day] = (out[day] || 0) + ms; };
+  local.forEach((hosts, day) => Object.keys(hosts).forEach((h) => add(day, h, hosts[h])));
+  Object.keys(remoteItems || {}).forEach((k) => {
+    const v = remoteItems[k];
+    const m = SYNC_ITEM.exec(k);
+    if (m) {
+      if (m[1] === ownId || !v.h) return; // our own copy is the local data
+      Object.keys(v.h).forEach((h) => add(m[2], h, (Number(v.h[h]) || 0) * 1000));
+    } else if (k !== 'u:' + ownId && v.d) { // legacy single-item format: daily totals
+      Object.keys(v.d).forEach((day) => add(day, EARLIER, (Number(v.d[day]) || 0) * 1000));
+    }
   });
-  return all;
+  return out;
 }
 async function loadMerged() {
   const s = await load();
-  s.remote = await getRemote(s.deviceId);
-  s.usageAll = mergeUsage(s.usage, s.remote);
+  s.remote = await readRemoteAll();
+  s.usageAll = poolByDay(await days(), s.remote, s.deviceId);
   return s;
 }
 
-// Upload this device's totals (seconds per day). The network call happens
-// OUTSIDE the storage lock so a slow sync can never delay counting.
+async function recordTime(s, nowMs, host, addMs) {
+  const m = await days();
+  const key = SL.dateKey(nowMs);
+  const hosts = m.get(key) || {};
+  hosts[host] = (hosts[host] || 0) + addMs;
+  m.set(key, hosts);
+  s.usageRev += 1;
+  s.dirtyDays[key] = s.usageRev;
+  await persistDay(key);
+}
+
+// One-off: older versions kept only { day: ms } for the tracked sites.
+async function migrate() {
+  await withLock(async () => {
+    const s = await load();
+    if (!s.usage) return;
+    const m = await days();
+    for (const day of Object.keys(s.usage)) {
+      const hosts = m.get(day) || {};
+      hosts[EARLIER] = (hosts[EARLIER] || 0) + s.usage[day];
+      m.set(day, hosts);
+      s.usageRev += 1;
+      s.dirtyDays[day] = s.usageRev;
+      await persistDay(day);
+    }
+    delete s.usage;
+    delete s.syncDirty;
+    await save(s);
+  });
+}
+
+// Upload changed days. The network call happens OUTSIDE the storage lock so a slow
+// sync can never delay counting. Only the day(s) that changed are written.
 let flushing = false;
+let lastFlushCheck = 0;
+const SYNC_MIN_SECONDS = 30;   // hosts with less time than this on a day are not uploaded
+const SYNC_MAX_HOSTS = 60;     // per device and day (keeps every item far below the 8 KB limit)
+function dayItem(hosts, strict) {
+  const minSec = strict ? 120 : SYNC_MIN_SECONDS;
+  const max = strict ? 20 : SYNC_MAX_HOSTS;
+  const all = !C.sync || C.sync.allSites !== false;
+  const h = {};
+  Object.keys(hosts)
+    .filter((k) => hosts[k] >= minSec * 1000 && (all || isTracked(k)))
+    .sort((a, b) => hosts[b] - hosts[a])
+    .slice(0, max)
+    .forEach((k) => { h[k] = Math.round(hosts[k] / 1000); });
+  return { v: 2, h };
+}
 async function flushSync(force) {
   if (!C.sync || !C.sync.enabled || flushing) return;
+  if (!force && Date.now() - lastFlushCheck < 5000) return;
+  lastFlushCheck = Date.now();
   const plan = await withLock(async () => {
     const s = await load();
-    if (!s.syncDirty) return null;
+    const dirty = Object.keys(s.dirtyDays);
+    if (!dirty.length) return null;
     const since = Date.now() - s.lastSyncWrite;
     if (since < SYNC_FLOOR_MS || (!force && since < SYNC_FLUSH_MS)) return null;
-    const cutoff = SL.dateKey(SL.addDays(nowOf(s), -SYNC_DAYS));
-    const d = {};
-    Object.keys(s.usage).forEach((k) => { if (k >= cutoff) d[k] = Math.round(s.usage[k] / 1000); });
-    return { id: s.deviceId, d, rev: s.usageRev || 0 };
+    const m = await days();
+    const hostsByDay = {};
+    dirty.forEach((day) => { if (m.has(day)) hostsByDay[day] = Object.assign({}, m.get(day)); });
+    return { id: s.deviceId, hostsByDay, rev: s.usageRev, days: dirty };
   });
   if (!plan) return;
   flushing = true;
   let ok = false;
+  const build = (strict) => {
+    const items = {};
+    Object.keys(plan.hostsByDay).forEach((day) => { items['u:' + plan.id + ':' + day] = dayItem(plan.hostsByDay[day], strict); });
+    return items;
+  };
+  const nonEmpty = (items) => { // days with nothing worth uploading (all hosts under the minimum) are skipped
+    Object.keys(items).forEach((k) => { if (!Object.keys(items[k].h).length) delete items[k]; });
+    return items;
+  };
   try {
-    await withTimeout(chrome.storage.sync.set({ ['u:' + plan.id]: { v: 1, upd: Date.now(), d: plan.d } }), SYNC_TIMEOUT_MS);
+    try {
+      const items = nonEmpty(build(false));
+      if (Object.keys(items).length) await withTimeout(chrome.storage.sync.set(items), SYNC_TIMEOUT_MS);
+    } catch (e) {
+      if (!/QUOTA/i.test(String(e && e.message))) throw e;
+      const items = nonEmpty(build(true));
+      if (Object.keys(items).length) await withTimeout(chrome.storage.sync.set(items), SYNC_TIMEOUT_MS); // smaller payload
+    }
     ok = true;
+    // the old single-item format of this device is now redundant
+    chrome.storage.sync.remove('u:' + plan.id).catch(() => {});
   } catch (e) {
     console.warn('[limiter] sync write failed', e); // stays dirty, retried later
   }
@@ -155,9 +260,39 @@ async function flushSync(force) {
   await withLock(async () => {
     const s = await load();
     s.lastSyncWrite = Date.now();
-    if (ok && (s.usageRev || 0) <= plan.rev) s.syncDirty = false; // nothing new since the snapshot
+    if (ok) plan.days.forEach((day) => { if ((s.dirtyDays[day] || 0) <= plan.rev) delete s.dirtyDays[day]; });
     await save(s);
   });
+}
+
+// Delete history older than retention.days from this device and from browser sync.
+let lastSyncPurge = 0;
+async function purgeOld(force) {
+  const cutoffOf = (s) => SL.dateKey(SL.addDays(nowOf(s), -retentionDays()));
+  let cutoff;
+  await withLock(async () => {
+    const s = await load();
+    cutoff = cutoffOf(s);
+    const m = await days();
+    let changed = false;
+    for (const day of Array.from(m.keys())) {
+      if (day < cutoff) {
+        m.delete(day);
+        await chrome.storage.local.remove(DAY_PREFIX + day);
+        delete s.dirtyDays[day];
+        changed = true;
+      }
+    }
+    if (changed) await save(s);
+  });
+  if (!C.sync || !C.sync.enabled) return;
+  if (!force && Date.now() - lastSyncPurge < 60 * 60 * 1000) return;
+  lastSyncPurge = Date.now();
+  try {
+    const all = await withTimeout(chrome.storage.sync.get(null), 10000);
+    const old = Object.keys(all).filter((k) => { const m = SYNC_ITEM.exec(k); return m && m[2] < cutoff; });
+    if (old.length) await withTimeout(chrome.storage.sync.remove(old), 10000);
+  } catch (e) { /* retried next hour */ }
 }
 
 /* ---------- toolbar button ---------- */
@@ -233,71 +368,95 @@ function handleTick(kind, sender) {
   });
 }
 
-function siteOf(sender) {
-  try {
-    return SL.siteForHost(new URL(sender.url || (sender.tab && sender.tab.url) || '').hostname);
-  } catch (e) { return null; }
-}
+function speedOf(s) { return C.debug.enabled ? Math.max(1, s.debug.speed || 1) : 1; }
 
 async function tickInner(kind, sender) {
-  {
-    // A page that is not (or no longer) on the tracked list is never counted.
-    const site = siteOf(sender);
-    if (!site) return { tracked: false };
-    const s = await loadMerged();
-    const real = Date.now();
+  const host = hostOf(sender);
+  if (!host) return { tracked: false };
+  const site = SL.siteForHost(host); // non-null = this page counts towards the limits
+  const real = Date.now();
+
+  /* ----- any other website: just record how long it is on screen during school hours ----- */
+  if (!site) {
+    if (kind !== 'tick') return { tracked: false };
+    const s = await load();
     const n = nowOf(s);
-    let st = SL.computeStatus(s, n, real);
-
-    // Usage fell back below a threshold the student had closed (new day, window
-    // slid, usage cleared): forget the dismissal so the banner can return.
-    let reset = false;
-    st.limits.forEach((l) => {
-      if (s.dismissed[l.id] !== undefined && l.level < s.dismissed[l.id]) { delete s.dismissed[l.id]; reset = true; }
-    });
-    if (reset) { await save(s); st = SL.computeStatus(s, n, real); }
-
-    if (kind === 'tick') {
-      const gap = real - s.lastTickReal;
-      s.lastTickReal = real;
-      // Wall-clock based: two visible windows can't double-count,
-      // and a long gap (sleep, hidden tab) is never counted.
-      if (st.canCount && gap > 0 && gap <= SL.MAX_GAP) {
-        const speed = C.debug.enabled ? Math.max(1, s.debug.speed || 1) : 1;
-        const key = SL.dateKey(n);
-        const add = gap * speed;
-        s.usage[key] = (s.usage[key] || 0) + add;
-        s.usageAll[key] = (s.usageAll[key] || 0) + add;
-        s.syncDirty = true;
-        s.usageRev += 1;
-        prune(s, n);
-      }
+    const inSchool = (C.debug.enabled && s.debug.ignoreSchoolHours) || SL.isSchoolTime(n);
+    const gap = real - (lastUntracked.get(host) || 0); // per host: two tabs of one site don't double-count
+    lastUntracked.set(host, real);
+    if (lastUntracked.size > 300) lastUntracked.clear();
+    if (inSchool && gap > 0 && gap <= SL.MAX_GAP) {
+      await recordTime(s, n, host, gap * speedOf(s));
       await save(s);
-      if (s.syncDirty) flushSync(false).catch(() => {}); // fire and forget
-      st = SL.computeStatus(s, n, real);
-      showBadge(st);
+      flushSync(false).catch(() => {}); // fire and forget
     }
-    enforceTab(sender.tab && sender.tab.id, st.locked).catch(() => {});
-    lastError = null;
-    st.tracked = true;
-    st.siteName = site.name;
-    st.notice = pickNotice(s);
-    return st;
+    return { tracked: false };
   }
+
+  /* ----- a tracked site: record, count towards the limits, lock, warn ----- */
+  const s = await loadMerged();
+  const n = nowOf(s);
+  let st = SL.computeStatus(s, n, real);
+
+  // Usage fell back below a threshold the student had closed (new day, window
+  // slid, usage cleared): forget the dismissal so the banner can return.
+  let reset = false;
+  st.limits.forEach((l) => {
+    if (s.dismissed[l.id] !== undefined && l.level < s.dismissed[l.id]) { delete s.dismissed[l.id]; reset = true; }
+  });
+  if (reset) { await save(s); st = SL.computeStatus(s, n, real); }
+
+  if (kind === 'tick') {
+    const gap = real - s.lastTickReal; // across ALL tracked tabs: two visible windows can't double-count
+    s.lastTickReal = real;
+    if (st.canCount && gap > 0 && gap <= SL.MAX_GAP) {
+      await recordTime(s, n, host, gap * speedOf(s));
+      s.usageAll = poolByDay(await days(), s.remote, s.deviceId);
+    }
+    await save(s);
+    flushSync(false).catch(() => {}); // fire and forget
+    st = SL.computeStatus(s, n, real);
+    showBadge(st);
+  }
+  enforceTab(sender.tab && sender.tab.id, st.locked).catch(() => {});
+  lastError = null;
+  st.tracked = true;
+  st.siteName = site.name;
+  st.notice = pickNotice(s);
+  return st;
 }
 
+function deviceCount(s) {
+  const ids = new Set([s.deviceId]);
+  Object.keys(s.remote || {}).forEach((k) => { const m = /^u:([0-9a-f-]{36})/.exec(k); if (m) ids.add(m[1]); });
+  return ids.size;
+}
+function siteTotalsToday(s, nowMs) { // debug view: who used what today (all devices)
+  const key = SL.dateKey(nowMs);
+  const tot = {};
+  const local = (dayCache && dayCache.get(key)) || {};
+  Object.keys(local).forEach((h) => { tot[h] = (tot[h] || 0) + local[h]; });
+  Object.keys(s.remote || {}).forEach((k) => {
+    const m = SYNC_ITEM.exec(k);
+    const v = s.remote[k];
+    if (m && m[1] !== s.deviceId && m[2] === key && v.h) Object.keys(v.h).forEach((h) => { tot[h] = (tot[h] || 0) + (Number(v.h[h]) || 0) * 1000; });
+  });
+  return Object.keys(tot).map((h) => ({ host: h, ms: tot[h], tracked: isTracked(h) })).sort((a, b) => b.ms - a.ms).slice(0, 40);
+}
 function debugStatus(s) {
   return publicStatus(s, {
     debugEnabled: true,
     debug: s.debug,
     usage: s.usageAll,
-    deviceCount: 1 + Object.keys(s.remote || {}).length,
+    siteTotals: siteTotalsToday(s, nowOf(s)),
+    deviceCount: deviceCount(s),
   });
 }
 
 async function handleDebug(msg) {
   return withLock(async () => {
     const s = await loadMerged();
+    const m = await days();
     switch (msg.op) {
       case 'setTime': {
         const t = new Date(msg.value).getTime();
@@ -309,17 +468,21 @@ async function handleDebug(msg) {
       case 'setSpeed': s.debug.speed = Math.min(3600, Math.max(1, Number(msg.value) || 1)); break;
       case 'ignoreHours': s.debug.ignoreSchoolHours = !!msg.value; break;
       case 'addUsage': {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(msg.date)) return { error: 'Invalid date' };
-        const add = (Number(msg.minutes) || 0) * SL.MIN;
-        s.usage[msg.date] = Math.max(0, (s.usage[msg.date] || 0) + add);
-        s.syncDirty = true;
+        const host = String(msg.host || 'open.spotify.com').trim().toLowerCase().replace(/^www\./, '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(msg.date) || !/^[a-z0-9.()-]{1,100}$/.test(host)) return { error: 'Invalid date or site' };
+        const hosts = m.get(msg.date) || {};
+        hosts[host] = Math.max(0, (hosts[host] || 0) + (Number(msg.minutes) || 0) * SL.MIN);
+        m.set(msg.date, hosts);
         s.usageRev += 1;
+        s.dirtyDays[msg.date] = s.usageRev;
+        await persistDay(msg.date);
         break;
       }
       case 'clearUsage': {
-        s.usage = {};
+        for (const day of Array.from(m.keys())) await chrome.storage.local.remove(DAY_PREFIX + day);
+        m.clear();
+        s.dirtyDays = {};
         s.dismissed = {};
-        s.syncDirty = false;
         try { // remove every device's synced totals so the cleared state sticks
           const all = await withTimeout(chrome.storage.sync.get(null), SYNC_TIMEOUT_MS);
           const keys = Object.keys(all).filter((k) => k.indexOf('u:') === 0);
@@ -331,8 +494,8 @@ async function handleDebug(msg) {
       }
       default: return { error: 'Unknown op' };
     }
-    s.remote = await getRemote(s.deviceId);
-    s.usageAll = mergeUsage(s.usage, s.remote);
+    s.remote = await readRemoteAll();
+    s.usageAll = poolByDay(m, s.remote, s.deviceId);
     await save(s);
     return debugStatus(s);
   });
@@ -354,7 +517,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           s.lastTickReal = 0;
           await save(s);
           clearBadge();
-          if (s.syncDirty) flushSync(true).catch(() => {});
+          if (Object.keys(s.dirtyDays).length) flushSync(true).catch(() => {});
           return { ok: true };
         });
       case 'status': {
@@ -393,7 +556,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'debug':
         if (!C.debug.enabled || !fromPage) return { error: 'disabled' };
         if (msg.op === 'syncNow') { // network call must happen outside the lock
-          await withLock(async () => { const s = await load(); s.syncDirty = true; s.usageRev += 1; s.lastSyncWrite = 0; await save(s); });
+          await withLock(async () => {
+            const s = await load();
+            (await days()).forEach((_, day) => { s.usageRev += 1; s.dirtyDays[day] = s.usageRev; }); // re-upload every day
+            s.lastSyncWrite = 0;
+            await save(s);
+          });
           await flushSync(true);
           if (remoteMem) remoteMem.at = 0;
           return debugStatus(await loadMerged());
@@ -459,10 +627,14 @@ let fetching = false;
 function applyEffective(rec) {
   settings = rec || {};
   SL.setConfig(SL.buildConfig(C, settings.data));
+  trackedMemo = new Map(); // the tracked list may have changed: earlier time on added/removed sites now (not) counts
 }
-const ready = chrome.storage.local.get(SETTINGS_KEY)
-  .then((o) => applyEffective(o[SETTINGS_KEY]))
-  .catch((e) => { applyEffective(null); lastError = 'settings load: ' + (e && e.message || e); });
+const ready = Promise.all([
+  chrome.storage.local.get(SETTINGS_KEY)
+    .then((o) => applyEffective(o[SETTINGS_KEY]))
+    .catch((e) => { applyEffective(null); lastError = 'settings load: ' + (e && e.message || e); }),
+  migrate().catch((e) => { lastError = 'migrate: ' + (e && e.message || e); }),
+]);
 
 function settingsInfo() {
   return {
@@ -532,6 +704,7 @@ async function afterSettingsApplied(changed) {
     if (dirty) await save(s);
   });
   await syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
+  if (changed) purgeOld(true).catch(() => {});
 }
 
 /* ---------- content scripts follow the tracked-site list ---------- */
@@ -541,31 +714,31 @@ function syncContentScripts(forceInject) {
   csChain = run.catch(() => {});
   return run;
 }
+const ALL_PAGES = ['https://*/*', 'http://*/*'];
 async function doSyncContentScripts(forceInject) {
-  const matches = SL.enabledHosts().map((h) => 'https://*.' + h + '/*').sort();
+  const tracked = SL.enabledHosts().map((h) => 'https://*.' + h + '/*').sort();
   const existing = await chrome.scripting.getRegisteredContentScripts();
   const main = existing.find((x) => x.id === 'sl-main');
   const content = existing.find((x) => x.id === 'sl-content');
-  const same = !!(main && content) && JSON.stringify((content.matches || []).slice().sort()) === JSON.stringify(matches);
+  const sameSet = (a, b) => JSON.stringify((a || []).slice().sort()) === JSON.stringify((b || []).slice().sort());
+  const same = !!content && sameSet(content.matches, ALL_PAGES) &&
+    (tracked.length ? !!main && sameSet(main.matches, tracked) : !main);
   if (same && !forceInject) return;
   if (!same) {
     if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: existing.map((x) => x.id) });
-    if (matches.length) {
-      await chrome.scripting.registerContentScripts([
-        { id: 'sl-main', matches, js: ['pip-guard.js'], runAt: 'document_start', world: 'MAIN', persistAcrossSessions: true },
-        { id: 'sl-content', matches, js: ['core.js', 'content.js'], runAt: 'document_start', persistAcrossSessions: true },
-      ]);
-    }
+    const list = [{ id: 'sl-content', matches: ALL_PAGES, js: ['core.js', 'content.js'], runAt: 'document_start', persistAcrossSessions: true }];
+    // auto-picture-in-picture is only blocked on the tracked music sites
+    if (tracked.length) list.push({ id: 'sl-main', matches: tracked, js: ['pip-guard.js'], runAt: 'document_start', world: 'MAIN', persistAcrossSessions: true });
+    await chrome.scripting.registerContentScripts(list);
   }
   // Pages that were already open don't get registered scripts until reload: inject now.
-  if (matches.length) {
-    const tabs = await chrome.tabs.query({ url: matches });
-    for (const t of tabs) {
-      try {
-        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['pip-guard.js'], world: 'MAIN' });
-        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['core.js', 'content.js'] });
-      } catch (e) { /* tab not injectable (discarded, error page, ...) */ }
-    }
+  const tabs = await chrome.tabs.query({ url: ALL_PAGES });
+  const trackedIds = new Set(tracked.length ? (await chrome.tabs.query({ url: tracked })).map((t) => t.id) : []);
+  for (const t of tabs) {
+    try {
+      if (trackedIds.has(t.id)) await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['pip-guard.js'], world: 'MAIN' });
+      await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['core.js', 'content.js'] });
+    } catch (e) { /* tab not injectable (discarded, browser page, ...) */ }
   }
 }
 
@@ -573,6 +746,7 @@ async function doSyncContentScripts(forceInject) {
 async function housekeeping() {
   await ready;
   await flushSync(true).catch(() => {});
+  await purgeOld(false).catch((e) => { lastError = 'purge: ' + (e && e.message || e); });
   await syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
   const s = await loadMerged();
   const st = SL.computeStatus(s, nowOf(s), Date.now());

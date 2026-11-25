@@ -315,6 +315,12 @@
       });
     });
 
+    section('retention', (v) => {
+      obj(v);
+      if (!Number.isInteger(v.days) || v.days < 1 || v.days > 365) throw new Error('days must be a whole number 1-365');
+      return { days: v.days };
+    });
+
     section('notices', (v) => {
       obj(v);
       const o = {};
@@ -347,6 +353,7 @@
     }
     if (remote.warning) cfg.warning = Object.assign({}, cfg.warning, remote.warning);
     if (remote.schoolHours) cfg.schoolHours = Object.assign({}, cfg.schoolHours, remote.schoolHours);
+    if (remote.retention) cfg.retention = Object.assign({}, cfg.retention, remote.retention);
     if (remote.holidays) cfg.holidays = JSON.parse(JSON.stringify(remote.holidays));
     cfg.notices = cfg.notices || {};
     cfg.notices.update = cfg.notices.update || { message: '' };

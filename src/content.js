@@ -1,14 +1,18 @@
-/* Runs on the tracked music sites (the background worker registers it). Reports "I'm visible" once a second and draws the UI.
- * All decisions (counting, locking) are made by the background worker. */
+/* Runs on every web page (the background worker registers it). While the page is visible it
+ * reports "I'm visible" once a second, so the worker can record time per website. The on-page
+ * UI (banners, timer, lock screen) is only created when the worker says this site is tracked.
+ * Only the host name is ever used - never the path, query, or page content.
+ * All decisions (recording, counting, locking) are made by the background worker. */
 (function () {
   'use strict';
   if (window.__slLoaded) return;
+  if (!/^https?:$/.test(location.protocol)) return;
   window.__slLoaded = true;
 
   const SL = self.SL;
   if (!SL) { console.error('[limiter] core.js not available - content script stopped'); return; }
   let siteName = 'This site'; // filled in from the background worker's answer
-  let tracked = true;
+  let tracked = true; // unknown until the worker answers; false = this page is not on the tracked list
   let locked = false;
   let dead = false; // extension was reloaded/updated: this copy of the script is orphaned
 
@@ -32,12 +36,8 @@
     }
   }
 
-  /* ---------- UI (closed shadow DOM so Spotify's CSS can't touch it) ---------- */
-  const host = document.createElement('div');
-  host.id = 'spotify-limiter-host';
-  host.style.cssText = 'all:initial;';
-  const root = host.attachShadow({ mode: 'closed' });
-  root.innerHTML = `
+  /* ---------- UI (built lazily, only on tracked sites; closed shadow DOM so the site's CSS can't touch it) ---------- */
+  const TEMPLATE = `
 <style>
   :host { all: initial; }
   * { box-sizing: border-box; font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
@@ -113,35 +113,43 @@
   </div>
 </div>`;
 
+  let host = null, root = null;
+  let banner, btext, notice, ntext, timer, dot, ttext, lock, why, when, usage, foot, ltitle;
+  let bannerFor = null; // { id, level } of the warning currently shown
+  let noticeId = null;
   const $ = (id) => root.getElementById(id);
-  const banner = $('banner'), btext = $('btext'), notice = $('notice'), ntext = $('ntext'), timer = $('timer'), dot = $('dot'), ttext = $('ttext'),
-        lock = $('lock'), why = $('why'), when = $('when'), usage = $('usage'), foot = $('foot');
 
   function attach() {
-    if (!host.isConnected) (document.documentElement || document).appendChild(host);
+    if (host && !host.isConnected) (document.documentElement || document).appendChild(host);
   }
-  attach();
-  // Re-attach if the page (or a curious student) removes the UI.
-  new MutationObserver(attach).observe(document, { childList: true, subtree: true });
 
-  let bannerFor = null; // { id, level } of the warning currently shown
-  $('bclose').addEventListener('click', () => {
-    banner.style.display = 'none';
-    if (bannerFor) {
-      send({ type: 'dismissWarning', limitId: bannerFor.id, level: bannerFor.level });
-    }
-  });
+  function ensureUI() {
+    if (host) return;
+    host = document.createElement('div');
+    host.id = 'spotify-limiter-host';
+    host.style.cssText = 'all:initial;';
+    root = host.attachShadow({ mode: 'closed' });
+    root.innerHTML = TEMPLATE;
+    banner = $('banner'); btext = $('btext'); notice = $('notice'); ntext = $('ntext');
+    timer = $('timer'); dot = $('dot'); ttext = $('ttext'); lock = $('lock'); why = $('why');
+    when = $('when'); usage = $('usage'); foot = $('foot'); ltitle = $('ltitle');
+    attach();
+    // Re-attach if the page (or a curious student) removes the UI.
+    new MutationObserver(attach).observe(document, { childList: true, subtree: true });
 
-  let noticeId = null;
-  $('nclose').addEventListener('click', () => {
-    notice.style.display = 'none';
-    if (noticeId) send({ type: 'dismissNotice', id: noticeId });
-  });
-
-  $('thide').addEventListener('click', () => {
-    timer.style.display = 'none';
-    send({ type: 'setTimerHidden', value: true });
-  });
+    $('bclose').addEventListener('click', () => {
+      banner.style.display = 'none';
+      if (bannerFor) send({ type: 'dismissWarning', limitId: bannerFor.id, level: bannerFor.level });
+    });
+    $('nclose').addEventListener('click', () => {
+      notice.style.display = 'none';
+      if (noticeId) send({ type: 'dismissNotice', id: noticeId });
+    });
+    $('thide').addEventListener('click', () => {
+      timer.style.display = 'none';
+      send({ type: 'setTimerHidden', value: true });
+    });
+  }
 
   /* ---------- helpers ---------- */
   function el(tag, cls, text) {
@@ -182,7 +190,7 @@
 
   /* ---------- render ---------- */
   function renderLock(st) {
-    $('ltitle').textContent = siteName + ' is locked';
+    ltitle.textContent = siteName + ' is locked';
     why.textContent = st.reached.length === 1
       ? 'You have used your ' + st.reached[0].noun + ' streaming allowance of ' + SL.fmtDur(st.reached[0].limitMs) + '.'
       : 'You have used your streaming allowance for: ' + st.reached.map((l) => l.noun + ' (' + SL.fmtDur(l.limitMs) + ')').join(', ') + '.';
@@ -224,6 +232,7 @@
 
   function hideAll() {
     locked = false;
+    if (!host) return; // never built: this page was never tracked
     banner.style.display = 'none';
     notice.style.display = 'none';
     lock.style.display = 'none';
@@ -232,7 +241,8 @@
 
   function render(st) {
     tracked = st.tracked !== false;
-    if (!tracked) { hideAll(); return; } // site was removed from the tracked list
+    if (!tracked) { hideAll(); return; } // not on (or removed from) the tracked list
+    ensureUI();
     if (st.siteName) siteName = st.siteName;
     locked = st.locked;
 
@@ -326,13 +336,16 @@
     } catch (e) {
       console.error('[limiter] render failed', e); // keep the loop alive no matter what
     }
-    if (gen === loopGen) schedule(!tracked ? 15000 : onScreen ? 1000 : 5000);
+    if (gen === loopGen) {
+      // A hidden page that isn't tracked has nothing to report: sleep until it becomes visible.
+      if (!(tracked === false && !onScreen)) schedule(onScreen ? 1000 : 5000);
+    }
   }
 
   document.addEventListener('visibilitychange', () => {
     if (dead) return;
     token++; // cancel pending timers
-    if (document.visibilityState === 'hidden' && !inPip()) {
+    if (document.visibilityState === 'hidden' && !inPip() && tracked !== false) {
       send({ type: 'idle' });
     }
     step();

@@ -95,8 +95,10 @@
       $('dbgSpeed').value = st.debug.speed || 1;
       $('dbgIgnore').checked = !!st.debug.ignoreSchoolHours;
     }
-    const rows = Object.keys(st.usage).sort().map((k) => k + '  ' + SL.fmtDur(st.usage[k]));
-    $('dbgRaw').textContent = rows.length ? rows.join('\n') : '(empty)';
+    const rows = Object.keys(st.usage).sort().map((k) => k + '  ' + SL.fmtDur(st.usage[k]) + ' counted');
+    const sites = (st.siteTotals || []).map((t) => (t.tracked ? '* ' : '  ') + t.host + '  ' + SL.fmtDur(t.ms));
+    $('dbgRaw').textContent = (rows.length ? rows.join('\n') : '(no counted time)') +
+      '\n\nToday by site (* = counts towards limits):\n' + (sites.length ? sites.join('\n') : '(nothing recorded)');
     $('dbgDevices').textContent = 'Devices contributing to this total: ' + st.deviceCount + ' (this one + ' + (st.deviceCount - 1) + ' synced)';
   }
 
@@ -138,7 +140,7 @@
     $('dbgResetTime').addEventListener('click', async () => { await dbg({ op: 'resetTime' }); populated = false; });
     $('dbgSetSpeed').addEventListener('click', () => dbg({ op: 'setSpeed', value: $('dbgSpeed').value }));
     $('dbgIgnore').addEventListener('change', (e) => dbg({ op: 'ignoreHours', value: e.target.checked }));
-    $('dbgAdd').addEventListener('click', () => dbg({ op: 'addUsage', date: $('dbgDate').value, minutes: $('dbgMin').value }));
+    $('dbgAdd').addEventListener('click', () => dbg({ op: 'addUsage', date: $('dbgDate').value, minutes: $('dbgMin').value, host: $('dbgHost').value }));
     $('dbgSync').addEventListener('click', () => dbg({ op: 'syncNow' }));
     $('dbgFetch').addEventListener('click', () => dbg({ op: 'fetchSettings' }));
     $('dbgSimInstall').addEventListener('click', () => dbg({ op: 'simNotice', kind: 'newInstall' }));
