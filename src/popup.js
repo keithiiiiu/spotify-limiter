@@ -26,7 +26,8 @@
     if (!s || !s.enabled) return 'Settings: built-in.';
     if (s.source === 'central') {
       return 'Settings: central' + (s.version ? ' v' + s.version : '') + ', checked ' + (s.checkedAt ? ago(s.checkedAt) : 'never') +
-        (s.error ? ' (last check failed - using saved copy)' : '') + '.';
+        (s.error ? ' (last check failed - using saved copy)' : '') +
+        (s.checkedAt && Date.now() - s.checkedAt > 75 * 60000 ? ' (overdue - not refreshing)' : '') + '.';
     }
     return 'Settings: built-in defaults' + (s.error ? ' (central file unavailable)' : ' (not downloaded yet)') + '.';
   }
@@ -142,7 +143,18 @@
     $('dbgIgnore').addEventListener('change', (e) => dbg({ op: 'ignoreHours', value: e.target.checked }));
     $('dbgAdd').addEventListener('click', () => dbg({ op: 'addUsage', date: $('dbgDate').value, minutes: $('dbgMin').value, host: $('dbgHost').value }));
     $('dbgSync').addEventListener('click', () => dbg({ op: 'syncNow' }));
-    $('dbgFetch').addEventListener('click', () => dbg({ op: 'fetchSettings' }));
+    $('dbgFetch').addEventListener('click', async () => {
+      $('dbgFetchMsg').textContent = 'Downloading\u2026';
+      let r = null;
+      try { r = await send({ type: 'debug', op: 'fetchSettings' }); } catch (e) { /* worker unavailable */ }
+      const f = r && r.fetchResult;
+      $('dbgFetchMsg').textContent = !f ? 'No answer from the extension - reload it.'
+        : f.skipped ? 'Central settings are switched off in config.js.'
+        : f.busy ? 'Another refresh is still running - try again in a few seconds.'
+        : f.ok === false ? 'Failed: ' + f.error + ' (still using the saved copy).'
+        : (f.changed ? 'Downloaded - settings changed.' : 'Downloaded - no change.') + (f.problems && f.problems.length ? ' Ignored: ' + f.problems.join('; ') : '');
+      refresh();
+    });
     $('dbgSimInstall').addEventListener('click', () => dbg({ op: 'simNotice', kind: 'newInstall' }));
     $('dbgSimUpdate').addEventListener('click', () => dbg({ op: 'simNotice', kind: 'update' }));
     $('dbgResetNotices').addEventListener('click', () => dbg({ op: 'resetNotices' }));

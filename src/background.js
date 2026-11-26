@@ -643,6 +643,8 @@ const REMOTE = C.remote || {};
 const REFRESH_MS = Math.max(1, Number(REMOTE.refreshMinutes) || 30) * 60 * 1000;
 let settings = {};           // last accepted record: { data, hash, version, fetchedAt, checkedAt, error, problems }
 let fetching = false;
+let fetchStartedAt = 0;
+const FETCH_STALE_MS = 30 * 1000; // a refresh that has not finished after this long is considered dead
 
 function applyEffective(rec) {
   settings = rec || {};
@@ -670,8 +672,11 @@ function settingsInfo() {
 
 async function fetchSettings() {
   if (!REMOTE.enabled || !REMOTE.url) return { skipped: true };
-  if (fetching) return { busy: true };
+  if (fetching && Date.now() - fetchStartedAt < FETCH_STALE_MS) return { busy: true };
   fetching = true;
+  fetchStartedAt = Date.now();
+  let changed = false;
+  let problems = [];
   try {
     await ready;
     const ctrl = new AbortController();
@@ -685,9 +690,11 @@ async function fetchSettings() {
       raw = JSON.parse(text);
     } finally { clearTimeout(timer); }
 
-    const { data, problems } = SL.sanitizeRemote(raw, settings.data);
+    const sanitized = SL.sanitizeRemote(raw, settings.data);
+    const data = sanitized.data;
+    problems = sanitized.problems;
     const hash = SL.hashString(JSON.stringify(data));
-    const changed = settings.hash !== hash;
+    changed = settings.hash !== hash;
     const rec = {
       data, hash, problems,
       version: data.version || null,
@@ -697,8 +704,6 @@ async function fetchSettings() {
     };
     await chrome.storage.local.set({ [SETTINGS_KEY]: rec }); // remembered until the JSON changes again
     applyEffective(rec);
-    await afterSettingsApplied(changed);
-    return { ok: true, changed, problems };
   } catch (e) {
     // Unavailable / invalid: keep using the last good copy (or the built-in defaults).
     const rec = Object.assign({}, settings, { checkedAt: Date.now(), error: String((e && e.message) || e) });
@@ -706,8 +711,13 @@ async function fetchSettings() {
     chrome.storage.local.set({ [SETTINGS_KEY]: rec }).catch(() => {});
     return { ok: false, error: rec.error };
   } finally {
-    fetching = false;
+    fetching = false; // always released, whatever happens below
   }
+  // Follow-up work (re-register scripts, unmute tabs, purge) runs on its own, with a time limit,
+  // so it can never keep the NEXT refresh from running.
+  withTimeout(afterSettingsApplied(changed), 60000)
+    .catch((e) => { lastError = 'after settings: ' + (e && e.message || e); });
+  return { ok: true, changed, problems };
 }
 
 async function afterSettingsApplied(changed) {
@@ -736,15 +746,29 @@ function syncContentScripts(forceInject) {
   return run;
 }
 const ALL_PAGES = ['https://*/*', 'http://*/*'];
+const INJECT_TIMEOUT_MS = 4000;   // a frozen/discarded tab must not stall everything
+const INJECT_BUDGET_MS = 20000;   // and the whole sweep has a ceiling
+async function injectInto(tabIds, files, world) {
+  const t0 = Date.now();
+  let n = 0;
+  for (const id of tabIds) {
+    if (Date.now() - t0 > INJECT_BUDGET_MS || n++ > 400) break;
+    try {
+      const target = { tabId: id };
+      await withTimeout(chrome.scripting.executeScript(world ? { target, files, world } : { target, files }), INJECT_TIMEOUT_MS);
+    } catch (e) { /* tab not injectable (discarded, browser page, slow, ...) */ }
+  }
+}
 async function doSyncContentScripts(forceInject) {
   const tracked = SL.enabledHosts().map((h) => 'https://*.' + h + '/*').sort();
   const existing = await chrome.scripting.getRegisteredContentScripts();
   const main = existing.find((x) => x.id === 'sl-main');
   const content = existing.find((x) => x.id === 'sl-content');
   const sameSet = (a, b) => JSON.stringify((a || []).slice().sort()) === JSON.stringify((b || []).slice().sort());
-  const same = !!content && sameSet(content.matches, ALL_PAGES) &&
-    (tracked.length ? !!main && sameSet(main.matches, tracked) : !main);
+  const contentOk = !!content && sameSet(content.matches, ALL_PAGES);
+  const same = contentOk && (tracked.length ? !!main && sameSet(main.matches, tracked) : !main);
   if (same && !forceInject) return;
+  const hadMatches = main && main.matches ? main.matches.slice() : [];
   if (!same) {
     if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: existing.map((x) => x.id) });
     const list = [{ id: 'sl-content', matches: ALL_PAGES, js: ['core.js', 'content.js'], runAt: 'document_start', persistAcrossSessions: true }];
@@ -752,14 +776,16 @@ async function doSyncContentScripts(forceInject) {
     if (tracked.length) list.push({ id: 'sl-main', matches: tracked, js: ['pip-guard.js'], runAt: 'document_start', world: 'MAIN', persistAcrossSessions: true });
     await chrome.scripting.registerContentScripts(list);
   }
-  // Pages that were already open don't get registered scripts until reload: inject now.
-  const tabs = await chrome.tabs.query({ url: ALL_PAGES });
-  const trackedIds = new Set(tracked.length ? (await chrome.tabs.query({ url: tracked })).map((t) => t.id) : []);
-  for (const t of tabs) {
-    try {
-      if (trackedIds.has(t.id)) await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['pip-guard.js'], world: 'MAIN' });
-      await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['core.js', 'content.js'] });
-    } catch (e) { /* tab not injectable (discarded, browser page, ...) */ }
+  // Pages that were already open don't get registered scripts until reload: inject now,
+  // but only what is actually new (the page script exists everywhere already when it was registered before).
+  if (!contentOk || forceInject) {
+    const tabs = await chrome.tabs.query({ url: ALL_PAGES });
+    await injectInto(tabs.map((t) => t.id), ['core.js', 'content.js']);
+  }
+  const fresh = forceInject || !main ? tracked : tracked.filter((m) => !hadMatches.includes(m));
+  if (fresh.length) {
+    const tabs = await chrome.tabs.query({ url: fresh });
+    await injectInto(tabs.map((t) => t.id), ['pip-guard.js'], 'MAIN');
   }
 }
 
