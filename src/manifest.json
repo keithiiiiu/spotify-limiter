@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Spotify Time Limiter",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Limits the time spent on Spotify (and other music sites) during school hours.",
   "minimum_chrome_version": "111",
   "update_url": "https://raw.githubusercontent.com/keithiiiiu/spotify-limiter/refs/heads/main/extension/edge.xml",

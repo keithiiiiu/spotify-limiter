@@ -341,8 +341,8 @@ async function enforceTab(tabId, locked) {
       const t = await chrome.tabs.get(tabId);
       if (!t.mutedInfo || !t.mutedInfo.muted) {
         await chrome.tabs.update(tabId, { muted: true });
+        ours.add(tabId);
       }
-      ours.add(tabId);
     } else if (ours.has(tabId)) {
       await chrome.tabs.update(tabId, { muted: false });
       ours.delete(tabId);
@@ -351,6 +351,26 @@ async function enforceTab(tabId, locked) {
     ours.delete(tabId);
   }
   await chrome.storage.session.set({ sl_muted: [...ours] });
+}
+
+// Tabs we muted must not stay muted once the lock is gone - including when the site was
+// removed from the tracked list (those tabs no longer match the tracked-site patterns).
+async function releaseMutedTabs() {
+  const o = await chrome.storage.session.get('sl_muted');
+  const ids = o.sl_muted || [];
+  if (!ids.length) return;
+  const s = await loadMerged();
+  const locked = SL.computeStatus(s, nowOf(s), Date.now()).locked;
+  const keep = [];
+  for (const id of ids) {
+    try {
+      const t = await chrome.tabs.get(id);
+      const host = new URL(t.url || '').hostname.toLowerCase().replace(/^www\./, '');
+      if (locked && SL.siteForHost(host)) { keep.push(id); continue; }
+      await chrome.tabs.update(id, { muted: false });
+    } catch (e) { /* tab closed or not readable: forget it */ }
+  }
+  await chrome.storage.session.set({ sl_muted: keep });
 }
 
 /* ---------- message handlers ---------- */
@@ -705,6 +725,7 @@ async function afterSettingsApplied(changed) {
   });
   await syncContentScripts(false).catch((e) => { lastError = 'content scripts: ' + (e && e.message || e); });
   if (changed) purgeOld(true).catch(() => {});
+  await releaseMutedTabs().catch(() => {}); // sites removed from the list / limits raised: give the sound back now
 }
 
 /* ---------- content scripts follow the tracked-site list ---------- */
@@ -752,9 +773,11 @@ async function housekeeping() {
   const st = SL.computeStatus(s, nowOf(s), Date.now());
   if (!st.counting && !st.locked) clearBadge();
   const patterns = siteUrlPatterns();
-  if (!patterns.length) return;
-  const tabs = await chrome.tabs.query({ url: patterns });
-  for (const t of tabs) await enforceTab(t.id, st.locked);
+  if (patterns.length) {
+    const tabs = await chrome.tabs.query({ url: patterns });
+    for (const t of tabs) await enforceTab(t.id, st.locked);
+  }
+  await releaseMutedTabs();
 }
 
 function ensureAlarms() {
