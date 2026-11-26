@@ -12,7 +12,7 @@
     { "name": "TIDAL",         "hosts": ["listen.tidal.com", "tidal.com"],       "enabled": true },
     { "name": "iHeartRadio",   "hosts": ["iheart.com"],                          "enabled": true },
     { "name": "TuneIn",        "hosts": ["tunein.com"],                          "enabled": true },
-    { "name": "test",          "hosts": ["aurorasandbox.edsby.com"],               "enabled": true }
+    { "name": "test",          "hosts": ["aurorasandbox.edsby.com"],               "enabled": false }
   ],
 
   "limits": {
