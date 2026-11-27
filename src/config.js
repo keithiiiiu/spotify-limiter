@@ -169,5 +169,5 @@ self.SL_CONFIG = {
    * pack.sh / pack.ps1 flip this to false automatically for production builds
    * (they look for the @DEBUG_FLAG marker - keep it on this line).
    */
-  debug: { enabled: true }, // @DEBUG_FLAG
+  debug: { enabled: false }, // @DEBUG_FLAG
 };
