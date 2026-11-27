@@ -49,9 +49,6 @@
 
   "notices": {
     "newInstall": { "message": "" },
-    "update": { 
-      "id": "v1.4.0", "message": "From now on, time spent on non-educational websites will count towards the Spotify usage limit, with the change applied retrospectively.",
-      "id": "v1.4.1", "message": "Teest 2"
-    }
+    "update":     { "id": "", "message": "From now on, time spent on non-educational websites will count towards the Spotify usage limit, with the change applied retrospectively." }
   }
 }
