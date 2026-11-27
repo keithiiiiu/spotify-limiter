@@ -12,12 +12,12 @@
     { "name": "TIDAL",         "hosts": ["listen.tidal.com", "tidal.com"],       "enabled": true },
     { "name": "iHeartRadio",   "hosts": ["iheart.com"],                          "enabled": true },
     { "name": "TuneIn",        "hosts": ["tunein.com"],                          "enabled": true },
-    { "name": "test",          "hosts": ["aurorasandbox.edsby.com"],               "enabled": true }
+    { "name": "test",          "hosts": ["aurorasandbox.edsby.com"],               "enabled": false }
   ],
 
   "limits": {
-    "daily":   { "enabled": true,  "hours": 0.5,  "days": 1  },
-    "weekly":  { "enabled": true,  "hours": 2,  "days": 7  },
+    "daily":   { "enabled": true,  "hours": 1,  "days": 1  },
+    "weekly":  { "enabled": true,  "hours": 3,  "days": 7  },
     "monthly": { "enabled": true, "hours": 10, "days": 30 }
   },
 
